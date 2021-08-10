@@ -1,0 +1,164 @@
+# --------------------- Подключение библиотек ---------------------- #
+import pandas as pd
+import numpy as np
+import random
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import mean_squared_error
+from xgboost import XGBClassifier, XGBRegressor
+from tkinter import *
+from tkinter import filedialog
+from scipy.signal import chirp, find_peaks, peak_widths
+import matplotlib.pyplot as plt
+import warnings
+# ------------------------------------------------------------------ #
+#Отключаем предупреждения компилятора
+warnings.filterwarnings("ignore")
+
+# Объявление переменных
+hord = [1,2, 7, 8, 11, 12, 13, 14, 15, 16]
+rs = [3, 4, 5, 6, 9, 10]
+accuracy = 0.0
+RMSE = 0.0
+child = []
+target_df = []
+count_def = 0
+# ------------------- Загрузка публичной выборки ------------------- #
+k3 = pd.read_csv("Results/К3.dat", sep=" ", skiprows=1, header=None)
+k16 = pd.read_csv("Results/К16.dat", sep=" ", skiprows=1, header=None)
+k22 = pd.read_csv("Results/К22.dat", sep=" ", skiprows=1, header=None)
+k24 = pd.read_csv("Results/К24.dat", sep=" ", skiprows=1, header=None)
+k28 = pd.read_csv("Results/К28.dat", sep=" ", skiprows=1, header=None)
+# ------------------------------------------------------------------ #
+# ------------------- Загрузка целевых переменных ------------------ #
+t3 = pd.read_csv("Target/k3.csv", sep="	")
+t16 = pd.read_csv("Target/k16.csv", sep="	")
+t22 = pd.read_csv("Target/k22.csv", sep="	")
+t24 = pd.read_csv("Target/k24.csv", sep="	")
+t28 = pd.read_csv("Target/k28.csv", sep="	")
+# ------------------------------------------------------------------ #
+# --------------- Функция сдвига и убирания нахлеста --------------- #
+def wrapshift(data):
+    data = data.iloc[:1020,:]
+    for col in data[hord].columns:
+        data[col] = np.roll(data[col], shift=-145)
+    for col in data[rs].columns:
+        data[col] = np.roll(data[col], shift=-50)
+    return data
+# ------------------------------------------------------------------ #
+# ------------------------------------------------------------------ #
+def new_target(data, target):
+    data["defect"] = 0
+    data["defect_h"] = -1
+    for i in range(0,target.shape[0] -1):
+        target_len = target.iloc[i][1] + target.iloc[i][0]
+        if target_len:
+            data["defect"][data.loc[(data.ix[:,0] >= target.iloc[i][0]) & (data.ix[:,0] <= target_len)].index] = 1
+            data["defect_h"][data.loc[(data.ix[:,0] >= target.iloc[i][0]) & (data.ix[:,0] <= target_len)].index] = target.iloc[i][2]
+# ------------------------------------------------------------------ #
+# ------------------------------------------------------------------ #
+def split_df(df, y):
+    return train_test_split(df, y, test_size=0.2, random_state=42, shuffle=None, stratify=y)#stratify=y)
+# ------------------------------------------------------------------ #
+
+k3 = wrapshift(k3)
+k16 = wrapshift(k16)
+k22 = wrapshift(k22)
+k24 = wrapshift(k24)
+k28 = wrapshift(k28)
+new_target(k3, t3)
+new_target(k16, t16)
+new_target(k22, t22)
+new_target(k24, t24)
+new_target(k28, t28)
+
+df = pd.concat([k3, k16, k22, k24, k28])
+df.columns=["len","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","target","target_h"]
+#Сглаживаем массив данных, средним с окном 5
+df[["1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16"]] = df.drop(["len","target","target_h"],axis=1).rolling(5).mean()
+
+df = df.fillna(0)
+X = df.drop(["target", "target_h"], axis=1)
+Y1 = df["target"]
+Y2 = df["target_h"]
+
+X_train, X_test, y_train, y_test = split_df(X, Y1)
+X_train_h, X_test_h, y_train_h, y_test_h = split_df(X, Y2)
+
+#Обучение моделей для предсказания на созданном выше массиве данных
+cModel = XGBClassifier(nthread=4, max_depth=8, n_estimators=800, subsample=0.5, seed=2056).fit(X_train, y_train)
+rModel = XGBRegressor(nthread=4, max_depth=8, n_estimators=800, subsample=0.5, seed=2056).fit(X_train_h, y_train_h)
+
+# Предсказание на тестовой выборке и оценка точности
+cPredict = cModel.predict(X_test)
+rPredict = rModel.predict(X_test_h)
+
+accuracy = accuracy_score(y_test, cPredict)
+RMSE = np.sqrt(mean_squared_error(y_test_h, rPredict))
+# ---------------------------------------------- находим пики в предсказаниях ------------------------------------------- #
+def preparePredict(cp, rp):
+    cdf = pd.DataFrame(cp, columns=["0"])
+    cdf = cdf.rolling(10).mean()
+    peaks, _ = find_peaks(cdf["0"])
+    results_full = peak_widths(cdf["0"], peaks, rel_height=1)
+    target_df = pd.DataFrame(columns=["Начало дефекта", "Длина дефекта", "Высота дефекта", "Тип дефекта", "Сторона"])
+    if len(results_full[2:][0]) > 0:
+        for i in range(len(results_full[2:][0])):
+            target_df.loc[len(target_df)] = [results_full[2:][0][i], results_full[2:][1][i] - results_full[2:][0][i], rp[peaks[i]],random.sample(set(["L","T"]), 1)[0],random.sample(set(["A","B"]), 1)[0]]
+    plt.plot(cdf["0"])
+    plt.plot(peaks, cdf["0"][peaks], "o")
+    plt.hlines(*results_full[1:], color="C4")
+    plt.show()
+    return target_df, len(results_full[2:][0])
+
+# --------------------------- Функция для подготовки данных и построения предсказания моделью  ---------------------------- #
+def getPredict(fileDF):
+    #fileDF = preprocess_len(fileDF)
+    fileDF = wrapshift(fileDF)
+    fileDF.columns=["len","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16"]
+    fileDF[["1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16"]] = fileDF.drop("len",axis=1).rolling(5).mean()
+    fileDF = fileDF.fillna(0)
+    cPredict = cModel.predict(fileDF)
+    rPredict = rModel.predict(fileDF)
+    target_df, coun = preparePredict(cPredict, rPredict)
+    return target_df, coun
+# ---------------------------------------------------  Сохраняем файлы ----------------------------------------------------- #
+def save_file(target_df):
+    SAVING_PATH = filedialog.asksaveasfile(mode='w', defaultextension=".csv", title='Сохранить результат')
+    target_df.to_csv(SAVING_PATH,index=False)
+# ---------------------------------------------------  Загружаем файлы ----------------------------------------------------- #
+def read_file():
+    file = filedialog.askopenfilenames(parent=main,title='Выберите файл.')
+    for i in file:
+        fileDF = pd.read_csv(i, sep="\s+", skiprows=1, header=None)
+        target_df, coun = getPredict(fileDF)
+        count_def = coun
+        child = Tk()
+        child.title("SaUIS")
+        child.config(background="white")
+        Label(child, text="Количество дефектов: " + str(count_def), bg="white", font="Arial 10", pady=10, padx=5).grid(row=1, columnspan=2)
+        Button(child, text="Сохранить результаты", command=lambda:save_file(target_df), bg="gray", fg="black", font="Arial 10", pady=5).grid(row=0,columnspan=1)
+        showed = Label(child, text="", bg="white", pady=10, fg="#F9690E", font="Arial 14")
+        showed.grid(columnspan=2)
+        text = Text(child, borderwidth=3, relief="sunken")
+        text.config(width=110)
+        text.grid(columnspan=2, padx=5, pady=5)
+        text.insert(1.0, str(target_df))
+        child.mainloop()
+        print(target_df)
+    return 0
+
+# -------------------------------------------------------- Главное окно ------------------------------------------------------ #
+main = Tk()
+main.title("SaUIS")
+main.config(background="white")
+x = (main.winfo_screenwidth() - main.winfo_reqwidth()) / 2
+y = (main.winfo_screenheight() - main.winfo_reqheight()) / 2
+main.wm_geometry("+%d+%d" % (x, y))
+main.resizable(False, False)
+Label(main,text="Точность классификатора: " + str(accuracy) ,bg="white",font="Arial 10",pady=10,padx=5).grid(row=0,columnspan=2)
+Label(main,text="Среднеквадратическое отклонение: " + str(RMSE),bg="white",font="Arial 10",pady=10,padx=5).grid(row=1,columnspan=2)
+Button(main,text="Выбрать файл", command=read_file, bg="gray",fg="black",font="Arial 10",pady=5).grid( columnspan=2)
+Label(main,text="", bg="white",font="Arial 10",pady=10,padx=5).grid(columnspan=2)
+main.mainloop()
+# ---------------------------------------------------------------------------------------------------------------------------- #
